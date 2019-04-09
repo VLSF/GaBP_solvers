@@ -1,7 +1,7 @@
 # GaBP_solvers
 ## Generalized Gaussian belief propagation solvers
 
-This repository accompanies the article (link) where we proposed new linear solvers based on the generalized belief propagation.
+This repository accompanies the [article](https://arxiv.org/abs/1904.04093) where we proposed new linear solvers based on the generalized belief propagation.
 
 There are two jupyter notebooks: "reproduce figures" and "template for your equations". The names are self-explanatory. The second notebook is of use for those who want to check the performance of our solvers on the favorite linear elliptic equation.
 
