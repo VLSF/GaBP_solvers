@@ -1,5 +1,5 @@
 # GaBP_solvers
-## Generalized Gaussian belief propagation solvers
+## Gaussian belief propagation solvers for nonsymmetric systems of linear equations
 
 This repository accompanies the [article](https://arxiv.org/abs/1904.04093) where we proposed new linear solvers based on the generalized belief propagation.
 
