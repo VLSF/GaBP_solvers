@@ -1,90 +1,5 @@
-from scipy.linalg import solve_triangular
-from scipy.sparse.linalg import cg, bicgstab, gmres
 import numpy as np
-
-JJJ = 0
-E = []
-
-def write_error(A, b, x):
-    global E
-    error = np.linalg.norm(A @ x - b, ord=np.inf)
-    E.append(error)
-
-def print_error(A, b, x):
-    global JJJ
-    global E
-    JJJ += 1
-    error = np.linalg.norm(A @ x - b, ord=np.inf)
-    print(f'Iteration #{JJJ}\n      error = {error:1.2}')
-
-def print_write_error(A, b, x):
-    global JJJ
-    global E
-    JJJ += 1
-    error = np.linalg.norm(A @ x - b, ord=np.inf)
-    E.append(error)
-    print(f'Iteration #{JJJ}\n      error = {error:1.2}')
-
-def CG(A, b, tol=1e-10, verbose=False, write=False):
-    global JJJ
-    global E
-    if write:
-        error = lambda x: write_error(A, b, x)
-    if verbose:
-        error = lambda x: print_error(A, b, x)
-    if  not write and  not verbose:
-        error = lambda x: True
-    if write and verbose:
-        error = lambda x: print_write_error(A, b, x)
-    x = cg(A, b, tol=tol, callback=error)
-    JJJ = 0
-    E1 = E
-    E = []
-    if write or (write and verbose):
-        return x, E1
-    else:
-        return x
-
-def BICGSTAB(A, b, tol=1e-10, verbose=False, write=False):
-    global JJJ
-    global E
-    if write:
-        error = lambda x: write_error(A, b, x)
-    if verbose:
-        error = lambda x: print_error(A, b, x)
-    if not write and  not verbose:
-        error = lambda x: True
-    if write and verbose:
-        error = lambda x: print_write_error(A, b, x)
-    x = bicgstab(A, b, tol=tol, callback=error)
-    E1 = E
-    E = []
-    JJJ = 0
-    if write or (write and verbose):
-        return x[0], E1
-    else:
-        return x[0]
-
-def GS(A, b, tol=1e-10, verbose=False, write=False):
-    L_A = np.tril(A)
-    r_A = A - L_A
-    error = 1
-    i = 0
-    x = np.zeros_like(b)
-    E = []
-    E.append(np.linalg.norm(A @ x - b, ord=np.inf))
-    while error>tol:
-        x = solve_triangular(L_A, b - r_A @ x, lower=True)
-        error = np.linalg.norm(A @ x - b, ord=np.inf)
-        i+=1
-        if write:
-            E.append(error)
-        if verbose:
-            print(f'Iteration #{i}\n      error = {error:1.2}')
-    if write:
-        return x, E
-    else:
-        return x
+from scipy.linalg import solve_triangular
 
 def exact_marginalization(A, b):
     inverse = np.linalg.inv(A)
@@ -97,9 +12,11 @@ def stripes_BP_solver(A, b, tol=1e-10, verbose=False, write=False):
     me, var = np.zeros_like(b), np.zeros_like(b)
     M = int(np.sqrt(N))
     horizontal_regions = np.arange(N).reshape((M,-1))
-    m_h = np.zeros((M, M, 2))# [from which horizontal, to which vertical, mean/variance]
+    m_h = np.zeros((M, M))# [from which horizontal, to which vertical]
+    m_h_old = np.zeros((M, M))
     vertical_regions = np.arange(N).reshape((M,-1)).T
-    m_v = np.zeros((M, M, 2))# [from which vertical, to which horizontal, mean/variance]
+    m_v = np.zeros((M, M))# [from which vertical, to which horizontal]
+    m_v_old = np.zeros((M, M))
 
     A_horizontal = np.zeros((M, M, M))
     b_horizontal = np.zeros((M, M))
@@ -124,43 +41,28 @@ def stripes_BP_solver(A, b, tol=1e-10, verbose=False, write=False):
 
         # horizontal update
         for i in range(M):
-            delta_A = np.diag(m_v[:, i, 1])
-            delta_b = m_v[:, i, 0]*m_v[:, i, 1]
-            variances, means = exact_marginalization(A_horizontal[i]+delta_A, b_horizontal[i]+delta_b)
-            m_h[i, :, 1] = 1/variances - (np.diag(A_horizontal[i]) + m_v[:, i, 1])
-            ############
-            #m_h[i, :, 1][np.where(abs(m_h[i, :, 1]) < 1e-10)] = 1e-5 # regularization
-            ############
-            m_h[i, :, 0] = (means/variances - (b_horizontal[i] + delta_b))/m_h[i, :, 1]
+            delta_A = np.diag(m_v[:, i])
+            variances, _ = exact_marginalization(A_horizontal[i]+delta_A, b_horizontal[i])
+            m_h[i, :] = 1/variances - (np.diag(A_horizontal[i]) + m_v[:, i])
 
         # vertical update
         for i in range(M):
-            delta_A = np.diag(m_h[:, i, 1])
-            delta_b = m_h[:, i, 0]*m_h[:, i, 1]
-            variances, means = exact_marginalization(A_vertical[i]+delta_A, b_vertical[i]+delta_b)
-            m_v[i, :, 1] = 1/variances - (np.diag(A_vertical[i]) + m_h[:, i, 1])
-            ############
-            #m_v[i, :, 1][np.where(abs(m_v[i, :, 1]) < 1e-10)] = 1e-5 # regularization
-            ############
-            m_v[i, :, 0] = (means/variances - (b_vertical[i] + delta_b))/m_v[i, :, 1]
+            delta_A = np.diag(m_h[:, i])
+            variances, _ = exact_marginalization(A_vertical[i]+delta_A, b_vertical[i])
+            m_v[i, :] = 1/variances - (np.diag(A_vertical[i]) + m_h[:, i])
 
-            ##
-            me[vertical_regions[i]] = means
-            var[vertical_regions[i]] = variances
-            ##
+        var = 1/(np.diag(A) + (m_h[:, :]).reshape((-1,)) + (m_v[:, :].T).reshape((-1,)))
 
-        # Two lines below give solution via ALL message accumulation. This is equivalent to the two lines above.
-        #var = 1/(np.diag(A) + (m_h[:, :, 1]).reshape((-1,)) + (m_v[:, :, 1].T).reshape((-1,)))
-        #me = var*(b + (np.prod(m_h[:, :, :], axis=2)).reshape((-1,)) + (np.prod(m_v[:, :, :], axis=2).T).reshape((-1,)))
-        error = np.linalg.norm(A @ me - b, ord=np.inf)
+        error = np.linalg.norm(m_h - m_h_old, ord=np.inf) + np.linalg.norm(m_v - m_v_old, ord=np.inf)
+        m_h_old = m_h; m_v_old = m_v
         if write:
             E.append(error)
         if verbose:
             print(f'Iteration #{k}\n      error = {error:1.2}')
     if write:
-        return me, E
+        return var, E
     else:
-        return me
+        return var
 
 def exact_diagonal(A, b):
     inv_A = np.linalg.inv(A)
@@ -196,42 +98,78 @@ def split_BP_solver(A, b, solve=exact_diagonal, tol=1e-10, verbose=False, write=
     E = []
     E.append(np.linalg.norm(A @ x - b, ord=np.inf))
     sigma = np.zeros_like(b)
+    old_sigma = np.zeros_like(b)
 
     error = 1
     k=0
     while error>tol:
         k+=1
         left_A[local_left_intersection, local_left_intersection] += right_to_left_precision
-        left_b[local_left_intersection] += right_to_left_precision*right_to_left_mean
         L_0, mu_0 = solve(left_A, left_b)
         left_A[local_left_intersection, local_left_intersection] -= right_to_left_precision
-        left_b[local_left_intersection] -= right_to_left_precision*right_to_left_mean
         left_to_right_precision = 1/L_0[local_left_intersection] - (right_to_left_precision + left_A[local_left_intersection, local_left_intersection])
-        left_to_right_mean = (mu_0[local_left_intersection]/L_0[local_left_intersection] - (right_to_left_mean*right_to_left_precision + left_b[local_left_intersection]))/left_to_right_precision
 
-        x[left_grid] = mu_0
         sigma[left_grid] = 1/L_0
 
         right_A[local_right_intersection, local_right_intersection] += left_to_right_precision
-        right_b[local_right_intersection] += left_to_right_precision*left_to_right_mean
         L_0, mu_0 = solve(right_A, right_b)
         right_A[local_right_intersection, local_right_intersection] -= left_to_right_precision
-        right_b[local_right_intersection] -= left_to_right_precision*left_to_right_mean
         right_to_left_precision = 1/L_0[local_right_intersection] - (left_to_right_precision + right_A[local_right_intersection, local_right_intersection])
-        right_to_left_mean = (mu_0[local_right_intersection]/L_0[local_right_intersection] - (left_to_right_mean*left_to_right_precision + right_b[local_right_intersection]))/right_to_left_precision
 
-        x[right_grid] = mu_0
         sigma[right_grid] = 1/L_0
 
-        error = np.linalg.norm(A @ x - b, ord=np.inf)
+        error = np.linalg.norm(sigma - old_sigma, ord=np.inf)
+        old_sigma = sigma
         if write:
             E.append(error)
         if verbose:
             print(f'Iteration #{k}\n      error = {error:1.2}')
     if write:
-        return x, E
+        return sigma, E
     else:
-        return x
+        return sigma
+
+def BP_solver(A, b, tol, verbose=False, write=False):
+    ind = np.where(A != 0)
+    L, L_new, mu, mu_new = np.zeros_like(A), np.zeros_like(A), np.zeros_like(A), np.zeros_like(A)
+    var = np.zeros_like(b)
+    var_old = np.zeros_like(b)
+    L[ind] += 0.1
+    mu[ind] += 0.1
+    error = 100
+    it_number = 0
+    E = []
+    while error > tol:
+        it_number += 1
+        for i, j in zip(ind[0], ind[1]):
+            if i != j:
+                diagonal = np.ones_like(A[j, :])
+                neighbours = np.where(A[j, :] != 0)
+                diagonal[neighbours] = A[neighbours, neighbours]
+                down = A[j, j] - np.sum(A[j, :]*L[:,j]/diagonal[:]) + L[i,j]*A[j, i]/A[i,i]
+                up = b[j] - np.sum(A[j,:]*mu[:, j]/diagonal[:]) + A[j,i]*mu[i, j]/A[i,i]
+                L_new[j, i] = A[j,j]*A[j, i]/down
+                mu_new[j, i] = A[j, j]*up/down
+
+        L = np.copy(L_new)
+        mu = np.copy(mu_new)
+        for i in range(len(b)):
+            diagonal = np.ones_like(A[i, :])
+            neighbours = np.where(A[i, :] != 0)
+            diagonal[neighbours] = A[neighbours, neighbours]
+            var[i] = 1/(A[i, i] - np.sum(A[i, :]*L[:, i]/diagonal))
+
+        error = np.linalg.norm(var - var_old, ord = np.inf)
+        var_old = var
+        if write:
+            E.append(error)
+        if verbose:
+            print(f'Iteration #{it_number}\n      error = {error:1.2}')
+
+    if write:
+        return var, E
+    else:
+        return var
 
 def thick_stripes_BP_solver(A, b, tol=1e-10, verbose=False, write=False):
     mean = np.zeros_like(b)
@@ -276,49 +214,43 @@ def thick_stripes_BP_solver(A, b, tol=1e-10, verbose=False, write=False):
     H_to_V_precision = np.zeros((N_h, N_v, 4, 4))
 
     error = 1
-    mean = np.zeros_like(b)
+    sigma = np.zeros_like(b)
+    old_sigma = np.zeros_like(b)
     E = []
     E.append(np.linalg.norm(A @ mean - b, ord=np.inf))
     k = 0
     while error>tol:
         for i in range(N_v):
             A_v[i][vertical_local_x, vertical_local_y] += H_to_V_precision[:, i]
-            b_v[i][vertical_coords] += np.einsum('ijk, ik -> ij', H_to_V_precision[:, i], H_to_V_mean[:, i])
             ###
             L_0 = np.linalg.inv(A_v[i])
-            m_0 = L_0 @ b_v[i]
             ###
             V_to_H_precision[i, :] = np.linalg.inv(L_0[vertical_local_x, vertical_local_y]) - A_v[i][vertical_local_x, vertical_local_y]
-            V_to_H_mean[i, :] = np.einsum('ijk, ik -> ij', np.linalg.inv(V_to_H_precision[i, :] + np.eye(4)*1e-10), (np.einsum('ijk, ik -> ij', np.linalg.inv(L_0[vertical_local_x, vertical_local_y]), m_0[vertical_coords]) - b_v[i][vertical_coords]))
 
             A_v[i][vertical_local_x, vertical_local_y] -= H_to_V_precision[:, i]
-            b_v[i][vertical_coords] -= np.einsum('ijk, ik -> ij', H_to_V_precision[:, i], H_to_V_mean[:, i])
 
 
         for i in range(N_h):
             A_h[i][horizontal_local_x, horizontal_local_y] += V_to_H_precision[:, i]
-            b_h[i][horizontal_coords] += np.einsum('ijk, ik -> ij', V_to_H_precision[:, i], V_to_H_mean[:, i])
             ###
             L_0 = np.linalg.inv(A_h[i])
-            m_0 = L_0 @ b_h[i]
             ###
             H_to_V_precision[i, :] = np.linalg.inv(L_0[horizontal_local_x, horizontal_local_y]) - A_h[i][horizontal_local_x, horizontal_local_y]
-            H_to_V_mean[i, :] = np.einsum('ijk, ik -> ij', np.linalg.inv(H_to_V_precision[i, :] + np.eye(4)*1e-10), (np.einsum('ijk, ik -> ij', np.linalg.inv(L_0[horizontal_local_x, horizontal_local_y]), m_0[horizontal_coords]) - b_h[i][horizontal_coords]))
 
             A_h[i][horizontal_local_x, horizontal_local_y] -= V_to_H_precision[:, i]
-            b_h[i][horizontal_coords] -= np.einsum('ijk, ik -> ij', V_to_H_precision[:, i], V_to_H_mean[:, i])
-            mean[global_horizontal[i]] = m_0
+
+            sigma[global_horizontal[i]] = np.diag(L_0)
         k+=1
-        error = np.linalg.norm(A @ mean - b, ord=np.inf)
+        error = np.linalg.norm(sigma - old_sigma, ord=np.inf)
+        old_sigma = sigma
         if write:
             E.append(error)
         if verbose:
             print(f'Iteration #{k}, error = {error:1.2}')
     if write:
-        return mean, E
+        return sigma, E
     else:
-        return mean
-
+        return sigma
 
 def GaBP(A, b, tol=1e-10, type='Sequential', verbose=False, write=False):
     v_out = []
@@ -330,7 +262,8 @@ def GaBP(A, b, tol=1e-10, type='Sequential', verbose=False, write=False):
         v_out[i] = v_out[i][v_out[i] != i]
         v_in[i] = v_in[i][v_in[i] != i]
 
-    L, L_new, mu, mu_new = np.zeros_like(A), np.zeros_like(A), np.zeros_like(A), np.zeros_like(A)
+    L, L_new = np.zeros_like(A), np.zeros_like(A)
+    var, var_old = np.zeros_like(b), np.zeros_like(b)
     x = np.zeros_like(b)
     it_number = 0
     defect = 1
@@ -339,23 +272,21 @@ def GaBP(A, b, tol=1e-10, type='Sequential', verbose=False, write=False):
     while defect > tol:
         it_number += 1
         for j in range(len(A[0,:])):
-            m = b[j] + np.sum(L[v_out[j], j]*mu[v_out[j], j])
             Sigma = A[j, j] + np.sum(A[v_out[j], j]*L[v_out[j], j])
-            x[j] = m/Sigma
+            var[j] = 1/Sigma
             if type == 'Sequential':
-                mu[j, v_in[j]] = m - L[v_in[j], j]*mu[v_in[j], j]
                 L[j, v_in[j]] = -A[v_in[j], j]/(Sigma - L[v_in[j], j]*A[v_in[j], j])
             if type == 'Parallel':
-                mu_new[j, v_in[j]] = m - L[v_in[j], j]*mu[v_in[j], j]
                 L_new[j, v_in[j]] = -A[v_in[j], j]/(Sigma - L[v_in[j], j]*A[v_in[j], j])
         if type == 'Parallel':
-            mu, L = np.copy(mu_new), np.copy(L_new)
-        defect = np.linalg.norm(A@x - b, ord=np.inf)
+            L = np.copy(L_new)
+        defect = np.linalg.norm(var - var_old, ord=np.inf)
+        var_old = np.copy(var)
         if write:
             E.append(defect)
         if verbose:
             print(f'Iteration #{it_number}, error = {defect:1.2}')
     if write:
-        return x, E
+        return var, E
     else:
-        return x
+        return var
