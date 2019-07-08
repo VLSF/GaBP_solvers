@@ -14,3 +14,5 @@ In the article, you can find an example of the matrix that is walk-summable in t
 Notebook [GaBP for non positive definite matrices.ipynb](https://github.com/VLSF/GaBP_solvers/blob/master/GaBP%20for%20non%20positive%20definite%20matrices.ipynb) contains numerical evidence that GaBP can handle real matrices with complex spectrum.
 
 Two notebooks [condition number.ipynb](https://github.com/VLSF/GaBP_solvers/blob/master/condition%20number.ipynb), [convergence and refinement.ipynb](https://github.com/VLSF/GaBP_solvers/blob/master/convergence%20and%20refinement.ipynb) reproduce all figures from the article.
+
+Sometimes github fails to render .ipynb, use [nbviewer](https://nbviewer.jupyter.org) in this case.
