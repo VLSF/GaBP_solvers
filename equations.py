@@ -1,6 +1,6 @@
 import sympy as sp
 import numpy as np
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, csc_matrix
 import bvp
 
 def construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y):
@@ -69,6 +69,23 @@ def construct_matrix(equation, type, L_x, L_y, n_x, n_y):
 
     return A, rhs, f
 
+def construct_multigrid_hierarchy(equation, J, l):
+    a, alpha, b, beta, q, f_rhs, up, left, down, right, exact = equation(1, 1)
+    AA = []
+
+    n = 2**J - 1
+    h = 1/(n+1)
+    x, y = np.linspace(h, 1-h, n), np.linspace(h, 1-h, n)
+    X, Y = np.meshgrid(x, y, indexing='ij')
+    rhs = bvp.mod_rhs(a, alpha, b, beta, q, f_rhs, up, left, down, right, 1, 1, n, n)
+
+    for j in range(J, J-l, -1):
+        n = 2**j - 1
+        row, col, values = bvp.d2A(a, alpha, b, beta, q, 1, 1, n, n)
+        A = coo_matrix((values, (row, col))).toarray()
+        AA.append(A)
+    return AA, rhs
+
 def laplacian_1_Neumann(L_x, L_y):
     x, y = sp.symbols('x, y', real=True)
     a = 1
@@ -115,26 +132,6 @@ def equation_3_Neumann(L_x, L_y):
     return construct_equation_Neumann(a, b, alpha, beta, exact, x, y, L_x, L_y)
 
 def laplacian(L_x, L_y):
-    x, y = sp.symbols('x, y', real=True)
-    a = 1
-    b = 1
-    alpha = 0
-    beta = 0
-    q = 0
-    exact = sp.cos(sp.pi*x)*sp.cos(sp.pi*y)
-    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
-
-def epsilon_laplacian(L_x, L_y, epsilon):
-    x, y = sp.symbols('x, y', real=True)
-    a = 1
-    b = epsilon
-    alpha = 0
-    beta = 0
-    q = 0
-    exact = sp.cos(sp.pi*x)*sp.cos(sp.pi*y)
-    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
-
-def laplacian_2(L_x, L_y):
     x, y = sp.symbols('x, y', real=True)
     a = 1
     b = 1
@@ -202,4 +199,104 @@ def equation_6(L_x, L_y):
     beta = sp.exp(2*x - 2*y)
     q = sp.exp(-3*x-4*y)
     exact = sp.cos(sp.pi*x)*sp.cos(sp.pi*y)
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def anisotropic_equation_0(L_x, L_y, epsilon):
+    x, y = sp.symbols('x, y', real=True)
+    a = 1
+    b = epsilon
+    alpha = 0
+    beta = 0
+    q = 0
+    exact = sp.cos(sp.pi*x)*sp.cos(sp.pi*y)
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def anisotropic_equation_1(L_x, L_y, epsilon):
+    x, y = sp.symbols('x, y', real=True)
+    a = (x-1/2)**2/epsilon + 1
+    b = (y-1/2)**2/epsilon + 1
+    alpha = 0
+    beta = 0
+    q = 0#1/2
+    exact = sp.sin(sp.pi*x)*sp.sin(sp.pi*y)
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def anisotropic_equation_2(L_x, L_y, epsilon):
+    x, y = sp.symbols('x, y', real=True)
+    a = (1 + sp.tanh((x-y)/epsilon))/2
+    b = (1 + sp.tanh((x+y-1)/epsilon))/2
+    alpha = 0
+    beta = 0
+    q = 0
+    exact = sp.sin(sp.pi*x)*sp.sin(sp.pi*y)
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def angle_strong_coupling(L_x, L_y, epsilon=0.01, beta=sp.pi/4):
+    x, y = sp.symbols('x, y', real=True)
+    a = -(sp.sin(beta)**2 + epsilon*sp.cos(beta)**2)
+    b = -(sp.cos(beta)**2 + epsilon*sp.sin(beta)**2)
+    alpha = 0
+    beta = 0
+    q = 2*(1-epsilon)*sp.cos(beta)*sp.sin(beta)
+    exact = x**2 + y**2 + 3*x*y**2
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def nonaligned_inner_layers(L_x, L_y, epsilon = 0.01):
+    x, y = sp.symbols('x, y', real=True)
+    a = -epsilon
+    b = -epsilon
+    alpha = -x
+    beta = -y
+    q = 0
+    exact = sp.exp(-(x+y-1)**2/epsilon)
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def boundary_layers(L_x, L_y, epsilon = 0.01):
+    x, y = sp.symbols('x, y', real=True)
+    a = -epsilon
+    b = -epsilon
+    alpha = 1
+    beta = 1
+    q = 0
+    exact = (sp.exp(-1/epsilon) - sp.exp((x - 1)/epsilon))/(sp.exp(-1/(epsilon)) - 1) + (sp.exp(-1/epsilon) - sp.exp((y - 1)/epsilon))/(sp.exp(-1/(epsilon)) - 1)
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def non_uniform_grid(L_x, L_y, eta, p, eps):
+    x, y = sp.symbols('x, y', real=True)
+    a = 1 + ((x-.5)**2 + eta)**p/eps
+    b = 1 + ((y-.5)**2 + eta)**p/eps
+    alpha = 0
+    beta = 0
+    q = 0
+    exact = sp.cos(sp.pi*2*(x+y))*sp.sin(sp.pi*2*(x-y))
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def nonaligned_non_uniform_grid(L_x, L_y, eps1, eps2):
+    x, y = sp.symbols('x, y', real=True)
+    a = 1 + sp.exp(-(x-y)**2/eps1)/eps2
+    b = 1 + sp.exp(-(x+y-1)**2/eps1)/eps2
+    alpha = 0
+    beta = 0
+    q = 0
+    exact = 3 + (x-0.5)*(y-0.5)
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def large_mixed_term(L_x, L_y, eps):
+    x, y = sp.symbols('x, y', real=True)
+    a = 1
+    b = 1
+    alpha = 0
+    beta = 0
+    q = 2 - eps
+    exact = 2*x**3*y**4
+    return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)
+
+def anisotropy_plus_mixing(L_x, L_y, eps1, eps2, eps):
+    x, y = sp.symbols('x, y', real=True)
+    a = 1 + sp.exp(-(x-y)**2/eps1)/eps2
+    b = 1 + sp.exp(-(x+y-1)**2/eps1)/eps2
+    alpha = 0
+    beta = 0
+    q = 2 - eps
+    exact = 3 + (2*(x-0.5))*6*(2*(y-0.5))*7
     return construct_equation(a, b, alpha, beta, q, exact, x, y, L_x, L_y)

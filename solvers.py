@@ -1,9 +1,11 @@
 from scipy.linalg import solve_triangular
-from scipy.sparse.linalg import cg, bicgstab, gmres
+from scipy.sparse.linalg import cg, bicgstab, gmres, spilu
+from scipy.sparse import csc_matrix
 import numpy as np
 
 JJJ = 0
 E = []
+fill_factor = 10
 
 def write_error(A, b, x):
     global E
@@ -355,6 +357,357 @@ def GaBP(A, b, tol=1e-10, type='Sequential', verbose=False, write=False):
             E.append(defect)
         if verbose:
             print(f'Iteration #{it_number}, error = {defect:1.2}')
+    if write:
+        return x, E
+    else:
+        return x
+
+def full_weight_restriction(u):
+    K = int(np.sqrt(len(u)))
+    M = int((K-1)/2)
+    v = np.zeros((M, M))
+    w = u.reshape((K, K))
+    v += w[1::2, 1::2]/4 + (w[::2, 1::2][:-1, :] + w[2::2, 1::2])/8
+    v += (w[1::2, ::2][:, :-1] + w[1::2, 2::2])/8
+    v += (w[::2, ::2][:-1, :-1] + w[2::2, 2::2] + w[::2, 2::2][:-1, :] + w[2::2, ::2][:, :-1])/16
+    v = v.reshape(-1,)
+    return v
+
+def full_weight_prolongation(u):
+    K = int(np.sqrt(len(u)))
+    v = np.zeros((2*K+1, 2*K+1))
+    v[1::2, 1::2] = u.reshape((K, K))
+    v[1::2, ::2][:, :-1] += v[1::2, 1::2]/2
+    v[1::2, 2::2] += v[1::2, 1::2]/2
+    v[::2, :][:-1, :] += v[1::2, :]/2
+    v[2::2, :] += v[1::2, :]/2
+    v = v.reshape(-1,)
+    return v
+
+def GS_smoother(A, b, x_0, N):
+    L_A = np.tril(A)
+    r_A = A - L_A
+    x = np.copy(x_0)
+    for _ in range(N):
+        x = solve_triangular(L_A, b - r_A @ x, lower=True)
+    return x
+
+def red_black_GS_smoother(A, b, x_0, N):
+    n = len(b)
+    coords = np.arange(n).reshape(int(np.sqrt(n)), -1)
+    black = np.sort(np.hstack([coords[::2, ::2].reshape(-1, ), coords[1::2, 1::2].reshape(-1, )]))
+    red = np.sort(np.hstack([coords[1::2, ::2].reshape(-1, ), coords[::2, 1::2].reshape(-1, )]))
+    x = np.copy(x_0)
+    for _ in range(N):
+        x[red] = 0
+        x[red] = (b[red] - (A @ x)[red])/A[red, red]
+        x[black] = 0
+        x[black] = (b[black] - (A @ x)[black])/A[black, black]
+    return x
+
+def four_colours_GS_smoother(A, b, x_0, N):
+    n = len(b)
+    coords = np.arange(n).reshape(int(np.sqrt(n)), -1)
+    black_1 = np.sort(coords[::2, ::2].reshape(-1, ))
+    black_2 = np.sort(coords[1::2, 1::2].reshape(-1, ))
+    red_1 = np.sort(coords[1::2, ::2].reshape(-1, ))
+    red_2 = np.sort(coords[::2, 1::2].reshape(-1, ))
+    x = np.copy(x_0)
+    for _ in range(N):
+        for colour in [red_1, red_2, black_1, black_2]:
+            x[colour] = 0
+            x[colour] = (b[colour] - (A @ x)[colour])/A[colour, colour]
+    return x
+
+def Jacobi_smoother(A, b, x_0, N, w=4/5):
+    D_A = np.diag(A)
+    r_A = A - np.diag(D_A)
+    x = np.copy(x_0)
+    for _ in range(N):
+        x = (1-w)*x + w*(b - r_A @ x)/D_A
+    return x
+
+def GaBP_smoother(A, d, x_0, N, type='Sequential'):
+    v_out = []
+    v_in = []
+    for i in range(len(A[0, :])):
+        v_out.append(np.where(A[i] != 0)[0])
+        v_in.append(np.where(A[:, i] != 0)[0])
+
+        v_out[i] = v_out[i][v_out[i] != i]
+        v_in[i] = v_in[i][v_in[i] != i]
+
+    L, L_new, mu, mu_new = np.zeros_like(A), np.zeros_like(A), np.zeros_like(A), np.zeros_like(A)
+    x = np.zeros_like(d)
+    b = d - A@x_0
+
+    for _ in range(N):
+        for j in range(len(A[0,:])):
+            m = b[j] + np.sum(L[v_out[j], j]*mu[v_out[j], j])
+            Sigma = A[j, j] + np.sum(A[v_out[j], j]*L[v_out[j], j])
+            x[j] = m/Sigma
+            if type == 'Sequential':
+                mu[j, v_in[j]] = m - L[v_in[j], j]*mu[v_in[j], j]
+                L[j, v_in[j]] = -A[v_in[j], j]/(Sigma - L[v_in[j], j]*A[v_in[j], j])
+            if type == 'Parallel':
+                mu_new[j, v_in[j]] = m - L[v_in[j], j]*mu[v_in[j], j]
+                L_new[j, v_in[j]] = -A[v_in[j], j]/(Sigma - L[v_in[j], j]*A[v_in[j], j])
+        if type == 'Parallel':
+            mu, L = np.copy(mu_new), np.copy(L_new)
+    return x_0 + x
+
+def red_black_GaBP_smoother(A, d, x_0, N):
+    v_out = []
+    v_in = []
+    for i in range(len(A[0, :])):
+        v_out.append(np.where(A[i] != 0)[0])
+        v_in.append(np.where(A[:, i] != 0)[0])
+
+        v_out[i] = v_out[i][v_out[i] != i]
+        v_in[i] = v_in[i][v_in[i] != i]
+
+    L, L_new, mu, mu_new = np.zeros_like(A), np.zeros_like(A), np.zeros_like(A), np.zeros_like(A)
+    x = np.zeros_like(d)
+    b = d - A@x_0
+    n = len(b)
+    coords = np.arange(n).reshape(int(np.sqrt(n)), -1)
+    black = np.sort(np.hstack([coords[::2, ::2].reshape(-1, ), coords[1::2, 1::2].reshape(-1, )]))
+    red = np.sort(np.hstack([coords[1::2, ::2].reshape(-1, ), coords[::2, 1::2].reshape(-1, )]))
+    order = np.hstack([red, black])
+
+    for _ in range(N):
+        for j in order:
+            m = b[j] + np.sum(L[v_out[j], j]*mu[v_out[j], j])
+            Sigma = A[j, j] + np.sum(A[v_out[j], j]*L[v_out[j], j])
+            x[j] = m/Sigma
+            mu[j, v_in[j]] = m - L[v_in[j], j]*mu[v_in[j], j]
+            L[j, v_in[j]] = -A[v_in[j], j]/(Sigma - L[v_in[j], j]*A[v_in[j], j])
+    return x_0 + x
+
+def four_colours_GaBP_smoother(A, d, x_0, N):
+    v_out = []
+    v_in = []
+    for i in range(len(A[0, :])):
+        v_out.append(np.where(A[i] != 0)[0])
+        v_in.append(np.where(A[:, i] != 0)[0])
+
+        v_out[i] = v_out[i][v_out[i] != i]
+        v_in[i] = v_in[i][v_in[i] != i]
+
+    L, L_new, mu, mu_new = np.zeros_like(A), np.zeros_like(A), np.zeros_like(A), np.zeros_like(A)
+    x = np.zeros_like(d)
+    b = d - A@x_0
+    n = len(b)
+    coords = np.arange(n).reshape(int(np.sqrt(n)), -1)
+    black_1 = np.sort(coords[::2, ::2].reshape(-1, ))
+    black_2 = np.sort(coords[1::2, 1::2].reshape(-1, ))
+    red_1 = np.sort(coords[1::2, ::2].reshape(-1, ))
+    red_2 = np.sort(coords[::2, 1::2].reshape(-1, ))
+    order = np.hstack([red_1, red_2, black_1, black_2])
+
+    for _ in range(N):
+        for j in order:
+            m = b[j] + np.sum(L[v_out[j], j]*mu[v_out[j], j])
+            Sigma = A[j, j] + np.sum(A[v_out[j], j]*L[v_out[j], j])
+            x[j] = m/Sigma
+            mu[j, v_in[j]] = m - L[v_in[j], j]*mu[v_in[j], j]
+            L[j, v_in[j]] = -A[v_in[j], j]/(Sigma - L[v_in[j], j]*A[v_in[j], j])
+    return x_0 + x
+
+def GaBP_parallel_smoother(A, d, x_0, N, w=4/5):
+    v_out = []
+    v_in = []
+    for i in range(len(A[0, :])):
+        v_out.append(np.where(A[i] != 0)[0])
+        v_in.append(np.where(A[:, i] != 0)[0])
+
+        v_out[i] = v_out[i][v_out[i] != i]
+        v_in[i] = v_in[i][v_in[i] != i]
+
+    L, L_new, mu, mu_new = np.zeros_like(A), np.zeros_like(A), np.zeros_like(A), np.zeros_like(A)
+    x = np.zeros_like(d)
+    b = d - A@x_0
+
+    for _ in range(N):
+        for j in range(len(A[0,:])):
+            m = b[j] + np.sum(L[v_out[j], j]*mu[v_out[j], j])
+            Sigma = A[j, j] + np.sum(A[v_out[j], j]*L[v_out[j], j])
+            x[j] = m/Sigma
+            mu_new[j, v_in[j]] = m - L[v_in[j], j]*mu[v_in[j], j]
+        L_new[j, v_in[j]] = -A[v_in[j], j]/(Sigma - L[v_in[j], j]*A[v_in[j], j])
+        mu, L = np.copy(mu_new), np.copy(L_new)
+    return x_0 + w*x
+
+def stripes_GaBP_smoother(A, d, x_0, N_it):
+    b = d - A@x_0
+    N = len(b)
+    me, var = np.zeros_like(b), np.zeros_like(b)
+    M = int(np.sqrt(N))
+    horizontal_regions = np.arange(N).reshape((M,-1))
+    m_h = np.zeros((M, M, 2))# [from which horizontal, to which vertical, mean/variance]
+    vertical_regions = np.arange(N).reshape((M,-1)).T
+    m_v = np.zeros((M, M, 2))# [from which vertical, to which horizontal, mean/variance]
+
+    A_horizontal = np.zeros((M, M, M))
+    b_horizontal = np.zeros((M, M))
+    A_vertical = np.zeros((M, M, M))
+    b_vertical = np.zeros((M, M))
+
+    for i in range(M):
+        x, y = np.meshgrid(horizontal_regions[i], horizontal_regions[i], indexing='ij')
+        w, z = np.meshgrid(vertical_regions[i], vertical_regions[i], indexing='ij')
+        A_horizontal[i] = A[x, y]
+        A_vertical[i] = A[w, z]
+        b_horizontal[i] = b[horizontal_regions[i]]
+        b_vertical[i] = b[vertical_regions[i]]
+
+    me = np.zeros_like(b)
+    for _ in range(N_it):
+
+        # horizontal update
+        for i in range(M):
+            delta_A = np.diag(m_v[:, i, 1])
+            delta_b = m_v[:, i, 0]*m_v[:, i, 1]
+            variances, means = exact_marginalization(A_horizontal[i]+delta_A, b_horizontal[i]+delta_b)
+            m_h[i, :, 1] = 1/variances - (np.diag(A_horizontal[i]) + m_v[:, i, 1])
+            m_h[i, :, 0] = (means/variances - (b_horizontal[i] + delta_b))/m_h[i, :, 1]
+
+        # vertical update
+        for i in range(M):
+            delta_A = np.diag(m_h[:, i, 1])
+            delta_b = m_h[:, i, 0]*m_h[:, i, 1]
+            variances, means = exact_marginalization(A_vertical[i]+delta_A, b_vertical[i]+delta_b)
+            m_v[i, :, 1] = 1/variances - (np.diag(A_vertical[i]) + m_h[:, i, 1])
+            m_v[i, :, 0] = (means/variances - (b_vertical[i] + delta_b))/m_v[i, :, 1]
+
+            ##
+            me[vertical_regions[i]] = means
+            var[vertical_regions[i]] = variances
+            ##
+
+    return x_0 + me
+
+def GS_line_x_smoother(A, b, x_0, N):
+    M = len(x_0)
+    K = int(np.sqrt(M))
+    coords = np.arange(M).reshape(K, -1)
+    x = np.copy(x_0)
+    for _ in range(N):
+        for i in range(K)[::2]:
+            X, Y = np.meshgrid(coords[i], coords[i], indexing='ij')
+            b_ = b[coords[i]]
+            if 0 <= i-1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i-1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i-1]]
+            if 0 <= i+1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i+1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i+1]]
+            x[coords[i]] = np.linalg.inv(A[X, Y]) @ b_
+        for i in range(K)[1::2]:
+            X, Y = np.meshgrid(coords[i], coords[i], indexing='ij')
+            b_ = b[coords[i]]
+            if 0 <= i-1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i-1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i-1]]
+            if 0 <= i+1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i+1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i+1]]
+            x[coords[i]] = np.linalg.inv(A[X, Y]) @ b_
+    return x
+
+def GS_line_y_smoother(A, b, x_0, N):
+    M = len(x_0)
+    K = int(np.sqrt(M))
+    coords = np.arange(M).reshape(K, -1).T
+    x = np.copy(x_0)
+    for _ in range(N):
+        for i in range(K)[::2]:
+            X, Y = np.meshgrid(coords[i], coords[i], indexing='ij')
+            b_ = b[coords[i]]
+            if 0 <= i-1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i-1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i-1]]
+            if 0 <= i+1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i+1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i+1]]
+            x[coords[i]] = np.linalg.inv(A[X, Y]) @ b_
+        for i in range(K)[1::2]:
+            X, Y = np.meshgrid(coords[i], coords[i], indexing='ij')
+            b_ = b[coords[i]]
+            if 0 <= i-1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i-1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i-1]]
+            if 0 <= i+1 <= K-1:
+                X_, Y_ = np.meshgrid(coords[i], coords[i+1], indexing='ij')
+                b_ -= A[X_, Y_] @ x[coords[i+1]]
+            x[coords[i]] = np.linalg.inv(A[X, Y]) @ b_
+    return x
+
+def GS_line_xy_smoother(A, b, x_0, N):
+    x = np.copy(x_0)
+    for _ in range(N):
+        x = GS_line_y_smoother(A, b, x, 1)
+        x = GS_line_x_smoother(A, b, x, 1)
+    return x
+
+def ilu_smoother(A, b, x_0, N):
+    global fill_factor
+    B = csc_matrix(A)
+    inv_B_approx = spilu(B, fill_factor=fill_factor)
+    x = np.copy(x_0)
+    for _ in range(N):
+        r = b - A@x
+        x = x + inv_B_approx.solve(r)
+    return x
+
+def multigrid_V_sweep(A, b, x_0, smoother, N_pre, N_post):
+    if len(A) == 1:
+        return x_0 + np.linalg.inv(A[0]) @ b
+    # pre smoothing
+    x_0 = smoother(A[0], b, x_0, N_pre)
+    # restriction
+    y = full_weight_restriction(b - A[0]@x_0)
+    # coarse solution
+    e = multigrid_V_sweep(A[1:], y, 0*y, smoother, N_pre, N_post)
+    # prolongation
+    x_0 += full_weight_prolongation(e)
+    # post smoothing
+    x_0 = smoother(A[0], b, x_0, N_post)
+    return x_0
+
+def multigrid_solver(A, b, smoother, N_pre, N_post, tol=1e-10, verbose=False, write=False):
+    error = 1
+    i = 0
+    x = np.zeros_like(b)
+    E = []
+    E.append(np.linalg.norm(A[0] @ x - b, ord=np.inf))
+    while error>tol:
+        x = multigrid_V_sweep(A, b, x, smoother, N_pre, N_post)
+        error = np.linalg.norm(A[0] @ x - b, ord=np.inf)
+        i+=1
+        if write:
+            E.append(error)
+        if verbose:
+            print(f'Iteration #{i}\n      error = {error:1.2}')
+    if write:
+        return x, E
+    else:
+        return x
+
+def generic_solver(A, b, smoother, tol=1e-10, verbose=False, write=False):
+    error = 1
+    i = 0
+    x = np.zeros_like(b)
+    E = []
+    E.append(np.linalg.norm(A @ x - b, ord=np.inf))
+    while error>tol:
+        x = smoother(A, b, x, 1)
+        error = np.linalg.norm(A @ x - b, ord=np.inf)
+        i+=1
+        if write:
+            E.append(error)
+        if verbose:
+            print(f'Iteration #{i}\n      error = {error:1.2}')
     if write:
         return x, E
     else:
